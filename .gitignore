@@ -1,0 +1,32 @@
+# Виртуальное окружение Python
+.venv/
+venv/
+env/
+
+# Секреты и локальная конфигурация
+.env
+
+# Логи приложения
+log/
+
+# Кэш и артефакты Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# База данных приложения (создаётся миграцией и загрузчиком)
+/data/*.db
+
+# Игнорируем прочие .db, кроме исходного учебного файла в Docs/
+*.db
+!Docs/contacts.db
+
+# IDE и ОС
+.idea/
+.vscode/
+.DS_Store
