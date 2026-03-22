@@ -123,24 +123,29 @@ async def load_all_characters(
         if offset + chunk_size < len(uids):
             await asyncio.sleep(0.5)
 
-    # Запись в БД последовательно в одном соединении — проще и достаточно быстро для ~80 строк.
+    if len(rows) != len(uids):
+        raise RuntimeError(
+            f"Загружено карточек {len(rows)}, ожидалось по индексу {len(uids)}"
+        )
+
+    # Пакетная асинхронная запись (executemany) в одной транзакции.
+    batch_params: list[tuple[Any, ...]] = [
+        (
+            row["id"],
+            row["birth_year"],
+            row["eye_color"],
+            row["gender"],
+            row["hair_color"],
+            row["homeworld"],
+            row["mass"],
+            row["name"],
+            row["skin_color"],
+        )
+        for row in rows
+    ]
     async with aiosqlite.connect(db_path) as connection:
         await connection.execute("PRAGMA foreign_keys = ON;")
-        for row in rows:
-            await connection.execute(
-                UPSERT_CHARACTER_SQL,
-                (
-                    row["id"],
-                    row["birth_year"],
-                    row["eye_color"],
-                    row["gender"],
-                    row["hair_color"],
-                    row["homeworld"],
-                    row["mass"],
-                    row["name"],
-                    row["skin_color"],
-                ),
-            )
+        await connection.executemany(UPSERT_CHARACTER_SQL, batch_params)
         await connection.commit()
 
     log_debug(

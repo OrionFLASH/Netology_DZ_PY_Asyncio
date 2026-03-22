@@ -42,10 +42,13 @@ class SwapiClient:
         """
         Обходит постранично /people и собирает все uid персонажей.
 
-        Возвращает отсортированный по возрастанию uid список строк (для стабильности
-        порядок можно отсортировать в конце).
+        Сравнивает число уникальных uid с полем total_records ответа API (если оно есть),
+        чтобы гарантировать полноту индекса до загрузки карточек.
+
+        Возвращает отсортированный по возрастанию uid список строк.
         """
-        uids: list[str] = []
+        uid_set: set[str] = set()
+        expected_total: int | None = None
         # Стартуем с первой страницы; limit берём крупным, чтобы уменьшить число запросов.
         next_url: str | None = f"{self._base_url}/people?page=1&limit=100"
 
@@ -56,23 +59,57 @@ class SwapiClient:
                 class_name=self.__class__.__name__,
                 def_name="fetch_all_people_uids",
             )
-            async with self._session.get(next_url) as response:
-                response.raise_for_status()
-                payload: dict[str, Any] = await response.json()
+            max_attempts: int = 4
+            payload: dict[str, Any] | None = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    async with self._session.get(next_url) as response:
+                        response.raise_for_status()
+                        payload = await response.json()
+                    break
+                except (
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                    TimeoutError,
+                ) as exc:
+                    if attempt == max_attempts:
+                        raise
+                    delay_list: float = 1.5 * attempt
+                    log_debug(
+                        self._logger,
+                        f"Ошибка списка персонажей: {exc!s}; пауза {delay_list} с",
+                        class_name=self.__class__.__name__,
+                        def_name="fetch_all_people_uids",
+                    )
+                    await asyncio.sleep(delay_list)
+
+            if payload is None:
+                raise RuntimeError("Пустой ответ при обходе списка персонажей")
 
             if payload.get("message") != _MESSAGE_OK:
                 raise RuntimeError(f"SWAPI вернул ошибку списка: {payload}")
 
+            if expected_total is None:
+                tr_raw: Any = payload.get("total_records")
+                if isinstance(tr_raw, int):
+                    expected_total = tr_raw
+
             for item in payload.get("results", []):
                 uid_raw: Any = item.get("uid")
                 if uid_raw is not None:
-                    uids.append(str(uid_raw))
+                    uid_set.add(str(uid_raw))
 
             next_raw: Any = payload.get("next")
             next_url = str(next_raw) if next_raw else None
 
-        # Стабильный числовой порядок id (uid в API — строки).
-        uids.sort(key=lambda x: int(x))
+        uids: list[str] = sorted(uid_set, key=lambda x: int(x))
+
+        if expected_total is not None and len(uids) != expected_total:
+            raise RuntimeError(
+                f"Несовпадение с SWAPI: total_records={expected_total}, "
+                f"собрано уникальных uid={len(uids)}"
+            )
+
         log_debug(
             self._logger,
             f"Всего найдено персонажей в индексе: {len(uids)}",

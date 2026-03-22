@@ -22,11 +22,25 @@
 2. Сохранить в БД поля: `id`, `birth_year`, `eye_color`, `gender`, `hair_color`, `homeworld`, `mass`, `name`, `skin_color`.
 3. Предоставить **скрипт миграции** БД и **скрипт загрузки** данных.
 
+## Соответствие заданию (контрольный список)
+
+| Требование | Реализация |
+|------------|------------|
+| Все персонажи из API | Индекс `/people` с пагинацией; число уникальных `uid` сверяется с полем `total_records` ответа SWAPI |
+| Поля записи | Таблица `characters` и словарь строки — ровно перечисленные в ДЗ поля (`id` = `uid`) |
+| Асинхронная выгрузка из API | `aiohttp`, параллельные карточки с семафором, чанки и отдельные сессии |
+| Асинхронная загрузка в БД | `aiosqlite`, пакет `executemany` + `commit` в одной транзакции |
+| Скрипт миграции | `python -m swapi_asyncio.migrate_db` |
+| Скрипт загрузки | `python -m swapi_asyncio.load_from_swapi` |
+| Контроль полноты после HTTP | Если число загруженных карточек не совпало с числом `uid` в индексе — `RuntimeError` |
+
+Проверка на рабочей среде (март 2026): после загрузки `SELECT COUNT(*) FROM characters` возвращает **82** — как `total_records` в SWAPI (значение может измениться при обновлении API).
+
 ## Описание решения
 
 - **База данных:** SQLite, файл по умолчанию `./data/characters.db` (переопределяется переменной `DATABASE_PATH` в `.env`).
 - **Миграция:** синхронный модуль `sqlite3` выполняет `CREATE TABLE IF NOT EXISTS` для таблицы `characters` (см. `src/swapi_asyncio/db_schema.py`, запуск — `python -m swapi_asyncio.migrate_db`).
-- **Загрузка:** `aiohttp` параллельно запрашивает список персонажей и карточки `/people/{uid}`; параллелизм ограничен семафором (`HTTP_CONCURRENCY`). Для устойчивости к нестабильному публичному API: повторные попытки при сетевых ошибках (см. `SwapiClient.fetch_person_row`), увеличенные таймауты чтения, пакетная загрузка чанками с **отдельной HTTP‑сессией на каждый чанк** и пакет `certifi` для проверки TLS. Запись в БД — `aiosqlite`, операция `INSERT OR REPLACE` для идемпотентности повторных запусков.
+- **Загрузка:** `aiohttp` параллельно запрашивает список персонажей и карточки `/people/{uid}`; параллелизм ограничен семафором (`HTTP_CONCURRENCY`). Для устойчивости к нестабильному публичному API: повторные попытки при сетевых ошибках для списка и карточек (`SwapiClient`), увеличенные таймауты чтения, пакетная загрузка чанками с **отдельной HTTP‑сессией на каждый чанк** и пакет `certifi` для проверки TLS. Запись в БД — `aiosqlite`, **`executemany`** с `INSERT OR REPLACE` для идемпотентности повторных запусков; перед записью проверяется `len(карточек) == len(uid из индекса)`.
 - **Логи:** каталог `log/`, имена файлов вида `INFO_swapi_ГГГГММДД_ЧЧ.log` и `DEBUG_swapi_ГГГГММДД_ЧЧ.log`; для уровня DEBUG строки имеют формат с полями `[class: … | def: …]` (см. `src/swapi_asyncio/logging_config.py`).
 
 ## Переменные окружения
@@ -92,7 +106,7 @@ PYTHONPATH=src python -m unittest discover -s src/Tests -p "test_*.py"
 | `get_database_path()` | Абсолютный путь к SQLite из `DATABASE_PATH` |
 | `get_swapi_base_url()` | Базовый URL SWAPI |
 | `get_http_concurrency()` | Лимит параллельных HTTP‑запросов |
-| `get_http_timeout_total()` | Таймаут сессии aiohttp |
+| `get_http_timeout_total()` | Таймаут одного запроса aiohttp (`total` / `sock_read`) |
 | `get_project_root()` | Корень репозитория |
 
 **Пример:** `path = get_database_path()` — путь для `migrate_db` и загрузчика.
@@ -122,14 +136,14 @@ PYTHONPATH=src python -m unittest discover -s src/Tests -p "test_*.py"
 | Имя | Назначение |
 |-----|------------|
 | `SwapiClient` | Класс клиента SWAPI |
-| `fetch_all_people_uids()` | Асинхронно собирает все `uid` из пагинации `/people` |
+| `fetch_all_people_uids()` | Асинхронно собирает уникальные `uid` из пагинации `/people`, сверяет с `total_records` |
 | `fetch_person_row(uid)` | Асинхронно возвращает словарь полей для одной записи БД |
 
 ### Модуль `swapi_asyncio.loader`
 
 | Имя | Назначение |
 |-----|------------|
-| `load_all_characters(logger, database_path=None)` | Полная асинхронная загрузка в БД; возвращает число записей |
+| `load_all_characters(logger, database_path=None)` | Полная асинхронная загрузка в БД (`executemany`); возвращает число записей |
 | `run_load_sync(logger, database_path=None)` | Обёртка `asyncio.run` для CLI |
 
 ### Модуль `swapi_asyncio.load_from_swapi`
@@ -144,7 +158,8 @@ PYTHONPATH=src python -m unittest discover -s src/Tests -p "test_*.py"
 |--------|-----------|
 | 0.1.0 | Первоначальная реализация: миграция SQLite, асинхронный загрузчик SWAPI, логирование, документация, тест DDL, материалы в `Docs/`. |
 | 0.1.1 | Устойчивость к медленному SWAPI: `certifi`, таймауты, повторы запросов, чанки и отдельные сессии; фильтр только DEBUG в отладочном логе. |
+| 0.1.2 | Проверка полноты: `total_records` vs уникальные `uid`, контроль числа карточек перед записью; пакетная запись `executemany`; повторы для запроса списка `/people`. |
 
 ## Git и удалённый репозиторий
 
-После проверки выполните коммит и `git push` в свой удалённый репозиторий (если настроен `origin`). Сообщения коммитов формулируйте по сути изменений.
+Ветка отслеживает `origin`; после изменений выполняйте коммит и `git push`. Сообщения коммитов формулируйте по сути изменений.
